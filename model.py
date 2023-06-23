@@ -138,7 +138,8 @@ class GPT(nn.Module):
         self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
 
         # init all weights
-        self.apply(self._init_weights)
+        self._init_weights()
+
         # apply special scaled init to the residual projections, per GPT-2 paper
         for pn, p in self.named_parameters():
             if pn.endswith('c_proj.weight'):
@@ -159,14 +160,31 @@ class GPT(nn.Module):
             n_params -= self.transformer.wpe.weight.numel()
         return n_params
 
-    def _init_weights(self, module):
+    def _init_weights(self):
+        # initializing the embeddings. These are one-hot so scaling not a problem
+        for emb in [self.transformer.wte, self.transformer.wpe]:
+            std = 1 / math.sqrt(self.config.n_embd)
+            nn.init.trunc_normal_(emb.weight, std=std, a=-3 * std, b=3 * std)
+
+        # initializing the weights of the transformer blocks
+        for i, block in enumerate(self.transformer.h):
+            block.apply(lambda m: self.block_init(m, i + 1))
+
+        # initializing the weights of the final layer heads
+        # 1/2 is to counteract the factor of 2 * depth
+        for module in [self.lm_head, self.num_head]:
+            module.apply(lambda m: self.block_init(m, 1 / 2))
+            
+    def block_init(self, module, depth):
         if isinstance(module, nn.Linear):
-            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            fan_in = module.weight.size(-1)
+            std = 1 / math.sqrt(2 * fan_in * depth)
+            torch.nn.init.trunc_normal_(
+                module.weight, mean=0.0, std=std, a=-3 * std, b=3 * std
+            )
             if module.bias is not None:
                 torch.nn.init.zeros_(module.bias)
-        elif isinstance(module, nn.Embedding):
-            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
-
+                
     def forward(self, idx, targets=None):
         device = idx.device
         b, t = idx.size()
@@ -298,7 +316,7 @@ class GPT(nn.Module):
         flops_per_iter = flops_per_fwdbwd * fwdbwd_per_iter
         # express our flops throughput as ratio of A100 bfloat16 peak flops
         flops_achieved = flops_per_iter * (1.0/dt) # per second
-        flops_promised = 312e12 # A100 GPU bfloat16 peak flops is 312 TFLOPS
+        flops_promised = 1e12  # base on teraflops
         mfu = flops_achieved / flops_promised
         return mfu
 
